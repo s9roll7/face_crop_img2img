@@ -18,6 +18,14 @@ import time
 def x_ceiling(value, step):
   return -(-value // step) * step
 
+def resize_img(img, w, h):
+    if img.shape[0] + img.shape[1] < h + w:
+        interpolation = interpolation=cv2.INTER_CUBIC
+    else:
+        interpolation = interpolation=cv2.INTER_AREA
+
+    return cv2.resize(img, (w, h), interpolation=interpolation)
+
 class Script(scripts.Script):
     face_detector = None
     mask_file_path = "scripts/face_crop_img2img_mask.png"
@@ -42,17 +50,27 @@ class Script(scripts.Script):
 # The returned values are passed to the run method as parameters.
 
     def ui(self, is_img2img):
-        max_crop = gr.Slider(minimum=0, maximum=1024, step=1, value=512, label="Max Crop Size")
-        face_denoising_strength = gr.Slider(minimum=0.00, maximum=1.00, step=0.01, value=0.5, label="Face Denoise Strength")
-        face_area = gr.Slider(minimum=1.00, maximum=3.00, step=0.01, value=1.5, label="Face Area")
-        #overwrite = gr.Checkbox(False, label="Overwrite existing files")
-        return [max_crop, face_denoising_strength,face_area]
+        max_crop = gr.Slider(minimum=0, maximum=2048, step=1, value=1024, label="Max Crop Size")
+        face_denoising_strength = gr.Slider(minimum=0.00, maximum=1.00, step=0.01, value=0.5, label="Face Denoising Strength")
+        face_area = gr.Slider(minimum=1.00, maximum=3.00, step=0.01, value=1.5, label="Face Area Magnification")
+
+        with gr.Column():
+            enable_face_prompt = gr.Checkbox(False, label="Enable Face Prompt")
+            face_prompt = gr.Textbox(label="Face Prompt", show_label=False, lines=2,
+                placeholder="Prompt for Face",
+                value = "face close up,"
+            )
+
+        return [max_crop, face_denoising_strength,face_area,enable_face_prompt,face_prompt]
 
     
     def detect_face(self, img_array):
         if not self.face_detector:
             dnn_model_path = autocrop.download_and_cache_models(os.path.join(models_path, "opencv"))
             self.face_detector = cv2.FaceDetectorYN.create(dnn_model_path, "", (0, 0))
+        
+        # image without alpha
+        img_array = img_array[:,:,:3]
         
         self.face_detector.setInputSize((img_array.shape[1], img_array.shape[0]))
         return self.face_detector.detect(img_array)
@@ -71,6 +89,7 @@ class Script(scripts.Script):
             self.mask_image = cv2.imread( self.mask_file_path ) / 255
         
         return self.mask_image
+    
   
 
 # This is where the additional processing is implemented. The parameters include
@@ -80,7 +99,7 @@ class Script(scripts.Script):
 # to be used in processing. The return value should be a Processed object, which is
 # what is returned by the process_images method.
 
-    def run(self, p, max_crop, face_denoising_strength, face_area):
+    def run(self, p, max_crop, face_denoising_strength, face_area, enable_face_prompt, face_prompt):
 
         def img_crop( img, face_coords,face_area,max_crop):
             img_array = np.array(img)
@@ -124,7 +143,7 @@ class Script(scripts.Script):
                 else:
                     re_w = int(x_ceiling( (512 / face_img.shape[0]) * face_img.shape[1] , 64))
                     re_h = 512
-                face_img = cv2.resize(face_img, (re_w, re_h), interpolation=cv2.INTER_CUBIC)
+                face_img = resize_img(face_img, re_w, re_h)
                 resized.append( Image.fromarray(face_img))
 
             return resized, new_coords
@@ -141,8 +160,8 @@ class Script(scripts.Script):
             h = int(face_coord[3] * y_rate)
 
             face_array = np.array(face_img)
-            face_array = cv2.resize(face_array, (w, h), interpolation=cv2.INTER_CUBIC)
-            mask = cv2.resize(mask, (w, h), interpolation=cv2.INTER_CUBIC)
+            face_array = resize_img(face_array, w, h)
+            mask = resize_img(mask, w, h)
 
             bg = img_array[y: y+h, x: x+w]
             img_array[y: y+h, x: x+w] = mask * face_array + (1-mask)*bg
@@ -197,6 +216,11 @@ class Script(scripts.Script):
             face_p.width = face.width
             face_p.height = face.height
             face_p.denoising_strength = face_denoising_strength
+
+            if enable_face_prompt:
+                face_p.prompt = face_prompt
+            else:
+                face_p.prompt = "close-up face ," + face_p.prompt
 
             if p.image_mask is not None:
                 x,y,w,h = coord
