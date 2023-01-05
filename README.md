@@ -2,7 +2,7 @@
 
 ## Overview
 #### AUTOMATIC1111 UI custom script
-#### Separate the area near the face from the rest of the face and img2img with different "Denoise Strength" settings
+#### Separate the area near the face from the rest of the face and img2img with different "Denoising Strength" settings
 
 ## Example
 
