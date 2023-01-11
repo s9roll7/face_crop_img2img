@@ -15,6 +15,8 @@
 #### Prompt for Face( face close up, spiderman )
 ![Prompt for Face](imgs/spiderman.png "Prompt for Face")
 
+#### Anime Face Detection
+![Anime Face Detection](imgs/anime_face_detection.png "Anime Face Detection")
 
 ## Installation
 - Use the Extensions tab of the webui to [Install from URL]
@@ -26,6 +28,7 @@
 - Generate
 
 ## Options
+- "Face Detection Method" ... Use YuNet for realistic images and Yolov5_anime for animated images.
 - "Max Crop Size" ... Maximum size of the face to be cropped. If the detected face is large, ignore it.
 - "Face Denoising Strength" ... "Denoising Strength" applied to the face
 - "Face Area Magnification" ... Size recognized as around the face. Magnification from the area that the face detection method considers to be a face.
