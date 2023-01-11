@@ -1,11 +1,9 @@
 import modules.scripts as scripts
 import gradio as gr
 import os
+import torch
 
-from modules import images
-from modules.processing import process_images, Processed
-from modules.processing import Processed
-from modules.shared import opts, cmd_opts, state
+from modules.processing import process_images
 from modules.paths import models_path
 from modules.textual_inversion import autocrop
 import cv2
@@ -13,10 +11,16 @@ import copy
 import numpy as np
 from PIL import Image
 import time
+import requests
 
+
+def get_my_dir():
+    if os.path.isdir("extensions/face_crop_img2img"):
+        return "extensions/face_crop_img2img"
+    return scripts.basedir()
 
 def x_ceiling(value, step):
-  return -(-value // step) * step
+    return -(-value // step) * step
 
 def resize_img(img, w, h):
     if img.shape[0] + img.shape[1] < h + w:
@@ -26,9 +30,29 @@ def resize_img(img, w, h):
 
     return cv2.resize(img, (w, h), interpolation=interpolation)
 
+def download_and_cache_models(dirname):
+    download_url = 'https://github.com/zymk9/yolov5_anime/blob/8b50add22dbd8224904221be3173390f56046794/weights/yolov5s_anime.pt?raw=true'
+    model_file_name = 'yolov5s_anime.pt'
+
+    if not os.path.exists(dirname):
+        os.makedirs(dirname)
+
+    cache_file = os.path.join(dirname, model_file_name)
+    if not os.path.exists(cache_file):
+        print(f"downloading face detection model from '{download_url}' to '{cache_file}'")
+        response = requests.get(download_url)
+        with open(cache_file, "wb") as f:
+            f.write(response.content)
+
+    if os.path.exists(cache_file):
+        return cache_file
+    return None
+
+
 class Script(scripts.Script):
+    anime_face_detector = None
     face_detector = None
-    mask_file_path = "scripts/face_crop_img2img_mask.png"
+    mask_file = "face_crop_img2img_mask.png"
     mask_image = None
 
 # The title of the script. This is what will be displayed in the dropdown menu.
@@ -50,6 +74,11 @@ class Script(scripts.Script):
 # The returned values are passed to the run method as parameters.
 
     def ui(self, is_img2img):
+        face_detection_method = gr.Dropdown(choices=["YuNet","Yolov5_anime"], value="YuNet" ,label="Face Detection Method")
+        gr.HTML(value="<p style='margin-bottom: 0.7em'>\
+                If loading of the Yolov5_anime model fails, check\
+                 <font color=\"blue\"><a href=\"https://github.com/AUTOMATIC1111/stable-diffusion-webui/issues/2235\">[this]</a></font> solution.\
+                </p>")
         max_crop = gr.Slider(minimum=0, maximum=2048, step=1, value=1024, label="Max Crop Size")
         face_denoising_strength = gr.Slider(minimum=0.00, maximum=1.00, step=0.01, value=0.5, label="Face Denoising Strength")
         face_area = gr.Slider(minimum=1.00, maximum=3.00, step=0.01, value=1.5, label="Face Area Magnification")
@@ -61,7 +90,7 @@ class Script(scripts.Script):
                 value = "face close up,"
             )
 
-        return [max_crop, face_denoising_strength,face_area,enable_face_prompt,face_prompt]
+        return [face_detection_method, max_crop, face_denoising_strength,face_area,enable_face_prompt,face_prompt]
 
     
     def detect_face(self, img_array):
@@ -69,11 +98,28 @@ class Script(scripts.Script):
             dnn_model_path = autocrop.download_and_cache_models(os.path.join(models_path, "opencv"))
             self.face_detector = cv2.FaceDetectorYN.create(dnn_model_path, "", (0, 0))
         
-        # image without alpha
-        img_array = img_array[:,:,:3]
-        
         self.face_detector.setInputSize((img_array.shape[1], img_array.shape[0]))
-        return self.face_detector.detect(img_array)
+        _, result = self.face_detector.detect(img_array)
+        return result
+
+    def detect_anime_face(self, img_array):
+        if not self.anime_face_detector:
+            anime_model_path = download_and_cache_models(os.path.join(models_path, "yolov5_anime"))
+
+            if not os.path.isfile(anime_model_path):
+                print( "WARNING!! " + anime_model_path + " not found.")
+                print( "use YuNet instead.")
+                return self.detect_face(img_array)
+            
+            self.anime_face_detector = torch.hub.load('ultralytics/yolov5', 'custom', path=anime_model_path)
+        
+        result = self.anime_face_detector(img_array)
+        #models.common.Detections
+        faces = []
+        for x_c, y_c, w, h, _, _ in result.xywh[0].tolist():
+            faces.append( [ x_c - w/2 , y_c - h/2, w, h ] )
+        
+        return faces
 
     def get_mask(self):
         def create_mask( output, x_rate, y_rate, k_size ):
@@ -83,10 +129,13 @@ class Script(scripts.Script):
             cv2.imwrite(output, img)
         
         if self.mask_image is None:
-            if not os.path.isfile(self.mask_file_path):
-                create_mask( self.mask_file_path, 0.9, 0.9, 91)
-            
-            self.mask_image = cv2.imread( self.mask_file_path ) / 255
+            mask_file_path = os.path.join( get_my_dir() , self.mask_file)
+            if not os.path.isfile(mask_file_path):
+                create_mask( mask_file_path, 0.9, 0.9, 91)
+
+            m = cv2.imread( mask_file_path )[:,:,0]
+            m = m[:, :, np.newaxis]
+            self.mask_image = m / 255
         
         return self.mask_image
     
@@ -99,7 +148,7 @@ class Script(scripts.Script):
 # to be used in processing. The return value should be a Processed object, which is
 # what is returned by the process_images method.
 
-    def run(self, p, max_crop, face_denoising_strength, face_area, enable_face_prompt, face_prompt):
+    def run(self, p, face_detection_method, max_crop, face_denoising_strength, face_area, enable_face_prompt, face_prompt):
 
         def img_crop( img, face_coords,face_area,max_crop):
             img_array = np.array(img)
@@ -161,25 +210,36 @@ class Script(scripts.Script):
 
             face_array = np.array(face_img)
             face_array = resize_img(face_array, w, h)
+
             mask = resize_img(mask, w, h)
+            if mask.ndim == 2:
+                mask = mask[:, :, np.newaxis]
 
             bg = img_array[y: y+h, x: x+w]
+
             img_array[y: y+h, x: x+w] = mask * face_array + (1-mask)*bg
 
             return Image.fromarray(img_array)
         
-        def detect_face(img, mask):
+        def detect_face(img, mask, face_detection_method):
             img_array = np.array(img)
 
-            if mask is None:
-                return self.detect_face(img_array)
+            if mask is not None:
+                mask_array = np.array(mask)/255
+
+                if mask_array.ndim == 2:
+                    mask_array = mask_array[:, :, np.newaxis]
                 
-            mask_array = np.array(mask)/255
+                img_array = mask_array * img_array
+                img_array = img_array.astype(np.uint8)
+            
+            # image without alpha
+            img_array = img_array[:,:,:3]
 
-            img_array = mask_array * img_array
-
-            return self.detect_face(img_array.astype(np.uint8))
-
+            if face_detection_method == "YuNet":
+                return self.detect_face(img_array)
+            elif face_detection_method == "Yolov5_anime":
+                return self.detect_anime_face(img_array)
 
         def save_image(img, dir_path):
             filename = "/" + "face_crop_img2img_" + time.strftime("%Y%m%d-%H%M%S") + ".png"
@@ -187,11 +247,16 @@ class Script(scripts.Script):
 
         ### face detect in base img
         base_img = p.init_images[0]
+
+        if base_img is None:
+            print("p.init_images[0] is None")
+            return process_images(p)
+
         base_img_size = (base_img.width, base_img.height)
 
-        _, face_coords = detect_face(base_img, p.image_mask)
+        face_coords = detect_face(base_img, p.image_mask,face_detection_method)
 
-        if face_coords is None:
+        if face_coords is None or len(face_coords) == 0:
             print("no face detected")
             return process_images(p)
 
